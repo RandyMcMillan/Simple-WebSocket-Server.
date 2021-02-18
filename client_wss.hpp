@@ -86,8 +86,15 @@ namespace SimpleWeb {
                 auto streambuf = std::make_shared<asio::streambuf>();
                 std::ostream ostream(streambuf.get());
                 auto host_port = this->host + ':' + std::to_string(this->port);
-                ostream << "CONNECT " + host_port + " HTTP/1.1\r\n"
-                        << "Host: " << host_port << "\r\n\r\n";
+                if(!this->config.proxy_auth.empty()) {
+                    auto credentials_base64 = std::make_shared<std::string>(Crypto::Base64::encode(this->config.proxy_auth));
+                    ostream << "CONNECT " + host_port + " HTTP/1.1\r\n"
+                            << "Proxy-Authorization: Basic " << *credentials_base64 << "\r\n"
+                            << "Host: " << host_port << "\r\n\r\n";
+                } else {
+                    ostream << "CONNECT " + host_port + " HTTP/1.1\r\n"
+                            << "Host: " << host_port << "\r\n\r\n";
+                }
                 connection->set_timeout(this->config.timeout_request);
                 asio::async_write(connection->socket->next_layer(), *streambuf, [this, connection, streambuf](const error_code &ec, std::size_t /*bytes_transferred*/) {
                   connection->cancel_timeout();

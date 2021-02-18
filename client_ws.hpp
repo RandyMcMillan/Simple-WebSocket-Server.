@@ -279,6 +279,8 @@ namespace SimpleWeb {
       CaseInsensitiveMultimap header;
       /// Set proxy server (server:port)
       std::string proxy_server;
+      /// Set proxy authorization (username:password)
+      std::string proxy_auth;
     };
     /// Set before calling start().
     Config config;
