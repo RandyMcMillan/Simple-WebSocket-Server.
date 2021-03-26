@@ -19,7 +19,7 @@ target_link_libraries(simple-websocket-server INTERFACE ${CMAKE_THREAD_LIBS_INIT
 # TODO 2020 when Debian Jessie LTS ends:
 # Remove Boost system, thread, regex components; use Boost::<component> aliases; remove Boost target_include_directories
 if(USE_STANDALONE_ASIO)
-    target_compile_definitions(simple-websocket-server INTERFACE USE_STANDALONE_ASIO)
+    target_compile_definitions(simple-websocket-server INTERFACE ASIO_STANDALONE)
     find_path(ASIO_PATH asio.hpp)
     if(NOT ASIO_PATH)
         message(FATAL_ERROR "Standalone Asio not found")
