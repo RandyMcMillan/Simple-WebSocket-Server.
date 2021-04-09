@@ -134,6 +134,13 @@ int main() {
   }
 
   {
+    SocketClientTest clientTest("test.org:test");
+    ASSERT(clientTest.path == "/");
+    ASSERT(clientTest.host == "test.org");
+    ASSERT(clientTest.port == 80);
+  }
+
+  {
     SocketClientTest clientTest("[::1]");
     ASSERT(clientTest.path == "/");
     ASSERT(clientTest.host == "::1");
@@ -159,6 +166,13 @@ int main() {
     ASSERT(clientTest.path == "/test");
     ASSERT(clientTest.host == "::1");
     ASSERT(clientTest.port == 8080);
+  }
+
+  {
+    SocketClientTest clientTest("[::1]:test/test");
+    ASSERT(clientTest.path == "/test");
+    ASSERT(clientTest.host == "::1");
+    ASSERT(clientTest.port == 80);
   }
 
   {
