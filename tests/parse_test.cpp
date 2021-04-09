@@ -57,30 +57,6 @@ public:
 
   void connect() {}
 
-  void constructor_parse_test1() {
-    ASSERT(path == "/test");
-    ASSERT(host == "test.org");
-    ASSERT(port == 8080);
-  }
-
-  void constructor_parse_test2() {
-    ASSERT(path == "/test");
-    ASSERT(host == "test.org");
-    ASSERT(port == 80);
-  }
-
-  void constructor_parse_test3() {
-    ASSERT(path == "/");
-    ASSERT(host == "test.org");
-    ASSERT(port == 80);
-  }
-
-  void constructor_parse_test4() {
-    ASSERT(path == "/");
-    ASSERT(host == "test.org");
-    ASSERT(port == 8080);
-  }
-
   void parse_response_header_test() {
     auto connection = std::shared_ptr<Connection>(new Connection(handler_runner, config.timeout_idle, *io_service));
     connection->in_message = std::shared_ptr<InMessage>(new InMessage());
@@ -136,18 +112,62 @@ int main() {
 
   serverTest.parse_request_test();
 
-  SocketClientTest clientTest("test.org:8080/test");
-  clientTest.constructor_parse_test1();
+  {
+    SocketClientTest clientTest("test.org:8080/test");
+    ASSERT(clientTest.path == "/test");
+    ASSERT(clientTest.host == "test.org");
+    ASSERT(clientTest.port == 8080);
+  }
 
-  SocketClientTest clientTest2("test.org/test");
-  clientTest2.constructor_parse_test2();
+  {
+    SocketClientTest clientTest("test.org/test");
+    ASSERT(clientTest.path == "/test");
+    ASSERT(clientTest.host == "test.org");
+    ASSERT(clientTest.port == 80);
+  }
 
-  SocketClientTest clientTest3("test.org");
-  clientTest3.constructor_parse_test3();
+  {
+    SocketClientTest clientTest("test.org");
+    ASSERT(clientTest.path == "/");
+    ASSERT(clientTest.host == "test.org");
+    ASSERT(clientTest.port == 80);
+  }
 
-  SocketClientTest clientTest4("test.org:8080");
-  clientTest4.io_service = std::make_shared<io_context>();
-  clientTest4.constructor_parse_test4();
+  {
+    SocketClientTest clientTest("[::1]");
+    ASSERT(clientTest.path == "/");
+    ASSERT(clientTest.host == "::1");
+    ASSERT(clientTest.port == 80);
+  }
 
-  clientTest4.parse_response_header_test();
+  {
+    SocketClientTest clientTest("[::1]/test");
+    ASSERT(clientTest.path == "/test");
+    ASSERT(clientTest.host == "::1");
+    ASSERT(clientTest.port == 80);
+  }
+
+  {
+    SocketClientTest clientTest("[::1]:8080");
+    ASSERT(clientTest.path == "/");
+    ASSERT(clientTest.host == "::1");
+    ASSERT(clientTest.port == 8080);
+  }
+
+  {
+    SocketClientTest clientTest("[::1]:8080/test");
+    ASSERT(clientTest.path == "/test");
+    ASSERT(clientTest.host == "::1");
+    ASSERT(clientTest.port == 8080);
+  }
+
+  {
+    SocketClientTest clientTest("test.org:8080");
+    clientTest.io_service = std::make_shared<io_context>();
+    ASSERT(clientTest.path == "/");
+    ASSERT(clientTest.host == "test.org");
+    ASSERT(clientTest.port == 8080);
+
+    clientTest.parse_response_header_test();
+  }
 }
