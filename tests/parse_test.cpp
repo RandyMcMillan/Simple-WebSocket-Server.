@@ -13,7 +13,7 @@ public:
   void accept() {}
 
   void parse_request_test() {
-    std::shared_ptr<Connection> connection(new Connection(handler_runner, 0, *io_service));
+    std::shared_ptr<Connection> connection(new Connection(handler_runner, 0, 0, *io_service));
 
     ostream ss(&connection->streambuf);
     ss << "GET /test/ HTTP/1.1\r\n";

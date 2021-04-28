@@ -90,8 +90,8 @@ namespace SimpleWeb {
     private:
       /// Used to call SocketServer::upgrade.
       template <typename... Args>
-      Connection(std::shared_ptr<ScopeRunner> handler_runner_, long timeout_idle, Args &&...args) noexcept
-          : handler_runner(std::move(handler_runner_)), socket(new socket_type(std::forward<Args>(args)...)), timeout_idle(timeout_idle), closed(false) {}
+      Connection(std::shared_ptr<ScopeRunner> handler_runner_, long timeout_idle, long timeout_ping, Args &&...args) noexcept
+          : handler_runner(std::move(handler_runner_)), socket(new socket_type(std::forward<Args>(args)...)), timeout_idle(timeout_idle), timeout_ping(timeout_ping), closed(false) {}
 
       std::shared_ptr<ScopeRunner> handler_runner;
 
@@ -101,9 +101,11 @@ namespace SimpleWeb {
       std::shared_ptr<InMessage> fragmented_in_message;
 
       long timeout_idle;
+      long timeout_ping;
 
       Mutex timer_mutex;
-      std::unique_ptr<asio::steady_timer> timer GUARDED_BY(timer_mutex);
+      std::unique_ptr<asio::steady_timer> timer_close GUARDED_BY(timer_mutex);
+      std::unique_ptr<asio::steady_timer> timer_ping GUARDED_BY(timer_mutex);
 
       std::atomic<bool> closed;
 
@@ -116,25 +118,47 @@ namespace SimpleWeb {
         LockGuard lock(timer_mutex);
 
         if(seconds == 0) {
-          timer = nullptr;
+          timer_close = nullptr;
           return;
         }
 
-        timer = make_steady_timer(*socket, std::chrono::seconds(seconds));
+        timer_close = make_steady_timer(*socket, std::chrono::seconds(seconds));
         std::weak_ptr<Connection> connection_weak(this->shared_from_this()); // To avoid keeping Connection instance alive longer than needed
-        timer->async_wait([connection_weak](const error_code &ec) {
+        timer_close->async_wait([connection_weak](const error_code &ec) {
           if(!ec) {
             if(auto connection = connection_weak.lock())
               connection->close(); // Servers are not required to send close frames
           }
         });
+
+        if(timer_ping != 0) {
+          static std::function<void(const std::weak_ptr<Connection> &connection_weak)> send_ping_delayed = [](const std::weak_ptr<Connection> &connection_weak) {
+            if(auto connection = connection_weak.lock()) {
+              LockGuard lock(connection->timer_mutex);
+              connection->timer_ping = make_steady_timer(*connection->socket, std::chrono::seconds(connection->timeout_ping));
+              connection->timer_ping->async_wait([connection_weak](const error_code &ec) {
+                if(!ec) {
+                  if(auto connection = connection_weak.lock()) {
+                    connection->send(
+                        "", [connection_weak](const SimpleWeb::error_code &ec) {
+                          if(!ec)
+                            send_ping_delayed(connection_weak);
+                        },
+                        0x89); // Ping
+                  }
+                }
+              });
+            }
+          };
+          send_ping_delayed(connection_weak);
+        }
       }
 
       void cancel_timeout() noexcept {
         LockGuard lock(timer_mutex);
-        if(timer) {
+        if(timer_close) {
           try {
-            timer->cancel();
+            timer_close->cancel();
           }
           catch(...) {
           }
@@ -334,6 +358,8 @@ namespace SimpleWeb {
       long timeout_request = 5;
       /// Idle timeout. Defaults to no timeout.
       long timeout_idle = 0;
+      /// Ping timeout. Defaults to no ping.
+      long timeout_ping = 0;
       /// Maximum size of incoming messages. Defaults to architecture maximum.
       /// Exceeding this limit will result in a message_size error code and the connection will be closed.
       std::size_t max_message_size = (std::numeric_limits<std::size_t>::max)();
@@ -824,7 +850,7 @@ namespace SimpleWeb {
 
   protected:
     void accept() override {
-      std::shared_ptr<Connection> connection(new Connection(handler_runner, config.timeout_idle, *io_service));
+      std::shared_ptr<Connection> connection(new Connection(handler_runner, config.timeout_idle, config.timeout_ping, *io_service));
 
       acceptor->async_accept(*connection->socket, [this, connection](const error_code &ec) {
         auto lock = connection->handler_runner->continue_lock();
