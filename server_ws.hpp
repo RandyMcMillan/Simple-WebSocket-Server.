@@ -109,12 +109,6 @@ namespace SimpleWeb {
 
       asio::ip::tcp::endpoint endpoint; // The endpoint is read in SocketServer::write_handshake and must be stored so that it can be read reliably in all handlers, including on_error
 
-      void close() noexcept {
-        error_code ec;
-        socket->lowest_layer().shutdown(asio::ip::tcp::socket::shutdown_both, ec);
-        socket->lowest_layer().cancel(ec);
-      }
-
       void set_timeout(long seconds = -1) noexcept {
         if(seconds == -1)
           seconds = timeout_idle;
@@ -257,6 +251,13 @@ namespace SimpleWeb {
 
         // fin_rsv_opcode=136: message close
         send(std::move(send_stream), std::move(callback), 136);
+      }
+
+      /// Force close connection. Use `send_close()` instead for standard compliant connection close.
+      void close() noexcept {
+        error_code ec;
+        socket->lowest_layer().shutdown(asio::ip::tcp::socket::shutdown_both, ec);
+        socket->lowest_layer().cancel(ec);
       }
 
       const asio::ip::tcp::endpoint &remote_endpoint() const noexcept {
