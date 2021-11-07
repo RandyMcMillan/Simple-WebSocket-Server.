@@ -71,7 +71,7 @@ namespace SimpleWeb {
     private:
       template <typename... Args>
       Connection(std::shared_ptr<ScopeRunner> handler_runner_, long timeout_idle, Args &&...args) noexcept
-          : handler_runner(std::move(handler_runner_)), socket(new socket_type(std::forward<Args>(args)...)), timeout_idle(timeout_idle), closed(false) {}
+          : handler_runner(std::move(handler_runner_)), socket(new socket_type(std::forward<Args>(args)...)), timeout_idle(timeout_idle), close_sent(false) {}
 
       std::shared_ptr<ScopeRunner> handler_runner;
 
@@ -84,7 +84,7 @@ namespace SimpleWeb {
       Mutex timer_mutex;
       std::unique_ptr<asio::steady_timer> timer GUARDED_BY(timer_mutex);
 
-      std::atomic<bool> closed;
+      std::atomic<bool> close_sent;
 
       asio::ip::tcp::endpoint endpoint; // The endpoint is read in SocketClient::upgrade and must be stored so that it can be read reliably in all handlers, including on_error
 
@@ -107,8 +107,12 @@ namespace SimpleWeb {
         timer->async_wait([connection_weak, use_timeout_idle](const error_code &ec) {
           if(!ec) {
             if(auto connection = connection_weak.lock()) {
-              if(use_timeout_idle)
-                connection->send_close(1000, "idle timeout"); // 1000=normal closure
+              if(use_timeout_idle) {
+                if(connection->close_sent)
+                  connection->close();
+                else
+                  connection->send_close(1000, "idle timeout"); // 1000=normal closure
+              }
               else
                 connection->close();
             }
@@ -234,9 +238,9 @@ namespace SimpleWeb {
 
       void send_close(int status, const std::string &reason = "", std::function<void(const error_code &)> callback = nullptr) {
         // Send close only once (in case close is initiated by client)
-        if(closed)
+        if(close_sent)
           return;
-        closed = true;
+        close_sent = true;
 
         auto out_message = std::make_shared<OutMessage>();
 
