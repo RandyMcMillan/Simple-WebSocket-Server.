@@ -91,7 +91,7 @@ int main() {
     auto out_message = in_message->string();
 
     // echo_all.get_connections() can also be used to solely receive connections on this endpoint
-    for(auto &a_connection : server.get_connections())
+    for(auto a_connection : server.get_connections())
       a_connection->send(out_message);
   };
 
