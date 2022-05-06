@@ -99,127 +99,106 @@ namespace SimpleWeb {
       return hex_stream.str();
     }
 
+    /// Return hash value using specific EVP_MD from input string.
+    static std::string message_digest(const std::string &s, const EVP_MD *evp_md, size_t digest_length) noexcept {
+      std::vector<unsigned char> md(digest_length, 0);
+
+      EVP_MD_CTX *ctx = EVP_MD_CTX_create();
+      EVP_MD_CTX_init(ctx);
+      EVP_DigestInit_ex(ctx, evp_md, NULL);
+      EVP_DigestUpdate(ctx, s.data(), s.size());
+      EVP_DigestFinal_ex(ctx, md.data(), NULL);
+      EVP_MD_CTX_destroy(ctx);
+
+      return std::string(md.begin(), md.end());
+    }
+
+    /// Return hash value using specific EVP_MD from input stream.
+    static std::string stream_digest(std::istream &stream, const EVP_MD *evp_md, size_t digest_length) noexcept {
+      std::vector<unsigned char> md(digest_length, 0);
+      std::vector<char> buffer(buffer_size);
+      std::streamsize read_length;
+
+      EVP_MD_CTX *ctx = EVP_MD_CTX_create();
+      EVP_MD_CTX_init(ctx);
+      EVP_DigestInit_ex(ctx, evp_md, NULL);
+      while((read_length = stream.read(&buffer[0], buffer_size).gcount()) > 0)
+        EVP_DigestUpdate(ctx, buffer.data(), static_cast<std::size_t>(read_length));
+      EVP_DigestFinal_ex(ctx, md.data(), NULL);
+      EVP_MD_CTX_destroy(ctx);
+
+      return std::string(md.begin(), md.end());
+    }
+
     /// Returns md5 hash value from input string.
     static std::string md5(const std::string &input, std::size_t iterations = 1) noexcept {
-      std::string hash;
-
-      hash.resize(128 / 8);
-      MD5(reinterpret_cast<const unsigned char *>(&input[0]), input.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
-      for(std::size_t c = 1; c < iterations; ++c)
-        MD5(reinterpret_cast<const unsigned char *>(&hash[0]), hash.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
+      const EVP_MD *evp_md = EVP_md5();
+      std::string hash = input;
+      for(std::size_t i = 0; i < iterations; ++i)
+        hash = message_digest(hash, evp_md, MD5_DIGEST_LENGTH);
       return hash;
     }
 
     /// Returns md5 hash value from input stream.
     static std::string md5(std::istream &stream, std::size_t iterations = 1) noexcept {
-      MD5_CTX context;
-      MD5_Init(&context);
-      std::streamsize read_length;
-      std::vector<char> buffer(buffer_size);
-      while((read_length = stream.read(&buffer[0], buffer_size).gcount()) > 0)
-        MD5_Update(&context, buffer.data(), static_cast<std::size_t>(read_length));
-      std::string hash;
-      hash.resize(128 / 8);
-      MD5_Final(reinterpret_cast<unsigned char *>(&hash[0]), &context);
-
-      for(std::size_t c = 1; c < iterations; ++c)
-        MD5(reinterpret_cast<const unsigned char *>(&hash[0]), hash.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
+      const EVP_MD *evp_md = EVP_md5();
+      std::string hash = stream_digest(stream, evp_md, MD5_DIGEST_LENGTH);
+      for(std::size_t i = 1; i < iterations; ++i)
+        hash = message_digest(hash, evp_md, MD5_DIGEST_LENGTH);
       return hash;
     }
 
     /// Returns sha1 hash value from input string.
     static std::string sha1(const std::string &input, std::size_t iterations = 1) noexcept {
-      std::string hash;
-
-      hash.resize(160 / 8);
-      SHA1(reinterpret_cast<const unsigned char *>(&input[0]), input.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
-      for(std::size_t c = 1; c < iterations; ++c)
-        SHA1(reinterpret_cast<const unsigned char *>(&hash[0]), hash.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
+      const EVP_MD *evp_md = EVP_sha1();
+      std::string hash = input;
+      for(std::size_t i = 0; i < iterations; ++i)
+        hash = message_digest(hash, evp_md, SHA_DIGEST_LENGTH);
       return hash;
     }
 
     /// Returns sha1 hash value from input stream.
     static std::string sha1(std::istream &stream, std::size_t iterations = 1) noexcept {
-      SHA_CTX context;
-      SHA1_Init(&context);
-      std::streamsize read_length;
-      std::vector<char> buffer(buffer_size);
-      while((read_length = stream.read(&buffer[0], buffer_size).gcount()) > 0)
-        SHA1_Update(&context, buffer.data(), static_cast<std::size_t>(read_length));
-      std::string hash;
-      hash.resize(160 / 8);
-      SHA1_Final(reinterpret_cast<unsigned char *>(&hash[0]), &context);
-
-      for(std::size_t c = 1; c < iterations; ++c)
-        SHA1(reinterpret_cast<const unsigned char *>(&hash[0]), hash.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
+      const EVP_MD *evp_md = EVP_sha1();
+      std::string hash = stream_digest(stream, evp_md, SHA_DIGEST_LENGTH);
+      for(std::size_t i = 1; i < iterations; ++i)
+        hash = message_digest(hash, evp_md, SHA_DIGEST_LENGTH);
       return hash;
     }
 
     /// Returns sha256 hash value from input string.
     static std::string sha256(const std::string &input, std::size_t iterations = 1) noexcept {
-      std::string hash;
-
-      hash.resize(256 / 8);
-      SHA256(reinterpret_cast<const unsigned char *>(&input[0]), input.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
-      for(std::size_t c = 1; c < iterations; ++c)
-        SHA256(reinterpret_cast<const unsigned char *>(&hash[0]), hash.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
+      const EVP_MD *evp_md = EVP_sha256();
+      std::string hash = input;
+      for(std::size_t i = 0; i < iterations; ++i)
+        hash = message_digest(hash, evp_md, SHA256_DIGEST_LENGTH);
       return hash;
     }
 
     /// Returns sha256 hash value from input stream.
     static std::string sha256(std::istream &stream, std::size_t iterations = 1) noexcept {
-      SHA256_CTX context;
-      SHA256_Init(&context);
-      std::streamsize read_length;
-      std::vector<char> buffer(buffer_size);
-      while((read_length = stream.read(&buffer[0], buffer_size).gcount()) > 0)
-        SHA256_Update(&context, buffer.data(), static_cast<std::size_t>(read_length));
-      std::string hash;
-      hash.resize(256 / 8);
-      SHA256_Final(reinterpret_cast<unsigned char *>(&hash[0]), &context);
-
-      for(std::size_t c = 1; c < iterations; ++c)
-        SHA256(reinterpret_cast<const unsigned char *>(&hash[0]), hash.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
+      const EVP_MD *evp_md = EVP_sha256();
+      std::string hash = stream_digest(stream, evp_md, SHA256_DIGEST_LENGTH);
+      for(std::size_t i = 1; i < iterations; ++i)
+        hash = message_digest(hash, evp_md, SHA256_DIGEST_LENGTH);
       return hash;
     }
 
     /// Returns sha512 hash value from input string.
     static std::string sha512(const std::string &input, std::size_t iterations = 1) noexcept {
-      std::string hash;
-
-      hash.resize(512 / 8);
-      SHA512(reinterpret_cast<const unsigned char *>(&input[0]), input.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
-      for(std::size_t c = 1; c < iterations; ++c)
-        SHA512(reinterpret_cast<const unsigned char *>(&hash[0]), hash.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
+      const EVP_MD *evp_md = EVP_sha512();
+      std::string hash = input;
+      for(std::size_t i = 0; i < iterations; ++i)
+        hash = message_digest(hash, evp_md, SHA512_DIGEST_LENGTH);
       return hash;
     }
 
     /// Returns sha512 hash value from input stream.
     static std::string sha512(std::istream &stream, std::size_t iterations = 1) noexcept {
-      SHA512_CTX context;
-      SHA512_Init(&context);
-      std::streamsize read_length;
-      std::vector<char> buffer(buffer_size);
-      while((read_length = stream.read(&buffer[0], buffer_size).gcount()) > 0)
-        SHA512_Update(&context, buffer.data(), static_cast<std::size_t>(read_length));
-      std::string hash;
-      hash.resize(512 / 8);
-      SHA512_Final(reinterpret_cast<unsigned char *>(&hash[0]), &context);
-
-      for(std::size_t c = 1; c < iterations; ++c)
-        SHA512(reinterpret_cast<const unsigned char *>(&hash[0]), hash.size(), reinterpret_cast<unsigned char *>(&hash[0]));
-
+      const EVP_MD *evp_md = EVP_sha512();
+      std::string hash = stream_digest(stream, evp_md, SHA512_DIGEST_LENGTH);
+      for(std::size_t i = 1; i < iterations; ++i)
+        hash = message_digest(hash, evp_md, SHA512_DIGEST_LENGTH);
       return hash;
     }
 
