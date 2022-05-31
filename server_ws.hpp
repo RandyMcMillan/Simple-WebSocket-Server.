@@ -275,7 +275,7 @@ namespace SimpleWeb {
       }
 
       /// Deprecated, please use remote_endpoint().address().to_string() instead.
-      DEPRECATED std::string remote_endpoint_address() const noexcept {
+      SW_DEPRECATED std::string remote_endpoint_address() const noexcept {
         try {
           return endpoint.address().to_string();
         }
@@ -285,7 +285,7 @@ namespace SimpleWeb {
       }
 
       /// Deprecated, please use remote_endpoint().port() instead.
-      DEPRECATED unsigned short remote_endpoint_port() const noexcept {
+      SW_DEPRECATED unsigned short remote_endpoint_port() const noexcept {
         try {
           return endpoint.port();
         }
