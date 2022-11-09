@@ -71,11 +71,17 @@ namespace SimpleWeb {
     private:
       template <typename... Args>
       Connection(std::shared_ptr<ScopeRunner> handler_runner_, long timeout_idle, Args &&...args) noexcept
-          : handler_runner(std::move(handler_runner_)), socket(new socket_type(std::forward<Args>(args)...)), timeout_idle(timeout_idle), close_sent(false) {}
+          : handler_runner(std::move(handler_runner_)), socket(new socket_type(std::forward<Args>(args)...)), read_write_strand(get_executor(socket->lowest_layer())), timeout_idle(timeout_idle), close_sent(false) {}
 
       std::shared_ptr<ScopeRunner> handler_runner;
 
       std::unique_ptr<socket_type> socket; // Socket must be unique_ptr since asio::ssl::stream<asio::ip::tcp::socket> is not movable
+
+      /**
+       * Needed for TLS communication where async_read and async_write cannot be called concurrently.
+       * For more information see https://stackoverflow.com/a/12801042.
+       */
+      strand read_write_strand;
 
       std::shared_ptr<InMessage> in_message;
       std::shared_ptr<InMessage> fragmented_in_message;
@@ -143,40 +149,46 @@ namespace SimpleWeb {
       std::list<OutData> send_queue GUARDED_BY(send_queue_mutex);
 
       void send_from_queue() REQUIRES(send_queue_mutex) {
+        auto buffer = send_queue.begin()->out_message->streambuf.data();
         auto self = this->shared_from_this();
         set_timeout();
-        asio::async_write(*self->socket, send_queue.begin()->out_message->streambuf, [self](const error_code &ec, std::size_t /*bytes_transferred*/) {
-          self->set_timeout(); // Set timeout for next send
+        post(read_write_strand, [self, buffer] {
           auto lock = self->handler_runner->continue_lock();
           if(!lock)
             return;
-          {
-            LockGuard lock(self->send_queue_mutex);
-            if(!ec) {
-              auto it = self->send_queue.begin();
-              auto callback = std::move(it->callback);
-              self->send_queue.erase(it);
-              if(self->send_queue.size() > 0)
-                self->send_from_queue();
+          asio::async_write(*self->socket, buffer, [self](const error_code &ec, std::size_t /*bytes_transferred*/) {
+            self->set_timeout(); // Set timeout for next send
+            auto lock = self->handler_runner->continue_lock();
+            if(!lock)
+              return;
+            {
+              LockGuard lock(self->send_queue_mutex);
+              if(!ec) {
+                auto it = self->send_queue.begin();
+                auto callback = std::move(it->callback);
+                self->send_queue.erase(it);
+                if(self->send_queue.size() > 0)
+                  self->send_from_queue();
 
-              lock.unlock();
-              if(callback)
-                callback(ec);
-            }
-            else {
-              // All handlers in the queue is called with ec:
-              std::vector<std::function<void(const error_code &)>> callbacks;
-              for(auto &out_data : self->send_queue) {
-                if(out_data.callback)
-                  callbacks.emplace_back(std::move(out_data.callback));
+                lock.unlock();
+                if(callback)
+                  callback(ec);
               }
-              self->send_queue.clear();
+              else {
+                // All handlers in the queue is called with ec:
+                std::vector<std::function<void(const error_code &)>> callbacks;
+                for(auto &out_data : self->send_queue) {
+                  if(out_data.callback)
+                    callbacks.emplace_back(std::move(out_data.callback));
+                }
+                self->send_queue.clear();
 
-              lock.unlock();
-              for(auto &callback : callbacks)
-                callback(ec);
+                lock.unlock();
+                for(auto &callback : callbacks)
+                  callback(ec);
+              }
             }
-          }
+          });
         });
       }
 
@@ -490,88 +502,93 @@ namespace SimpleWeb {
 
     void read_message(const std::shared_ptr<Connection> &connection, std::size_t num_additional_bytes) {
       connection->set_timeout();
-      asio::async_read(*connection->socket, connection->in_message->streambuf, asio::transfer_exactly(num_additional_bytes > 2 ? 0 : 2 - num_additional_bytes), [this, connection, num_additional_bytes](const error_code &ec, std::size_t bytes_transferred) {
-        connection->cancel_timeout();
+      post(connection->read_write_strand, [this, connection, num_additional_bytes] {
         auto lock = connection->handler_runner->continue_lock();
         if(!lock)
           return;
-        if(!ec) {
-          if(bytes_transferred == 0 && connection->in_message->streambuf.size() == 0) { // TODO: This might happen on server at least, might also happen here
-            this->read_message(connection, 0);
+        asio::async_read(*connection->socket, connection->in_message->streambuf, asio::transfer_exactly(num_additional_bytes > 2 ? 0 : 2 - num_additional_bytes), bind_executor(connection->read_write_strand, [this, connection, num_additional_bytes](const error_code &ec, std::size_t bytes_transferred) {
+          connection->cancel_timeout();
+          auto lock = connection->handler_runner->continue_lock();
+          if(!lock)
             return;
+          if(!ec) {
+            if(bytes_transferred == 0 && connection->in_message->streambuf.size() == 0) { // TODO: This might happen on server at least, might also happen here
+              this->read_message(connection, 0);
+              return;
+            }
+            auto updated_num_additional_bytes = num_additional_bytes > 2 ? num_additional_bytes - 2 : 0;
+
+            std::array<unsigned char, 2> first_bytes;
+            connection->in_message->read(reinterpret_cast<char *>(&first_bytes[0]), 2);
+
+            connection->in_message->fin_rsv_opcode = first_bytes[0];
+
+            // Close connection if masked message from server (protocol error)
+            if(first_bytes[1] >= 128) {
+              const std::string reason("message from server masked");
+              connection->send_close(1002, reason);
+              this->connection_close(connection, 1002, reason);
+              return;
+            }
+
+            std::size_t length = (first_bytes[1] & 127);
+
+            if(length == 126) {
+              // 2 next bytes is the size of content
+              connection->set_timeout();
+              asio::async_read(*connection->socket, connection->in_message->streambuf, asio::transfer_exactly(updated_num_additional_bytes > 2 ? 0 : 2 - updated_num_additional_bytes), bind_executor(connection->read_write_strand, [this, connection, updated_num_additional_bytes](const error_code &ec, std::size_t /*bytes_transferred*/) {
+                connection->cancel_timeout();
+                auto lock = connection->handler_runner->continue_lock();
+                if(!lock)
+                  return;
+                if(!ec) {
+                  std::array<unsigned char, 2> length_bytes;
+                  connection->in_message->read(reinterpret_cast<char *>(&length_bytes[0]), 2);
+
+                  std::size_t length = 0;
+                  std::size_t num_bytes = 2;
+                  for(std::size_t c = 0; c < num_bytes; c++)
+                    length += static_cast<std::size_t>(length_bytes[c]) << (8 * (num_bytes - 1 - c));
+
+                  connection->in_message->length = length;
+                  this->read_message_content(connection, updated_num_additional_bytes > 2 ? updated_num_additional_bytes - 2 : 0);
+                }
+                else
+                  this->connection_error(connection, ec);
+              }));
+            }
+            else if(length == 127) {
+              // 8 next bytes is the size of content
+              connection->set_timeout();
+              asio::async_read(*connection->socket, connection->in_message->streambuf, asio::transfer_exactly(updated_num_additional_bytes > 8 ? 0 : 8 - updated_num_additional_bytes), bind_executor(connection->read_write_strand, [this, connection, updated_num_additional_bytes](const error_code &ec, std::size_t /*bytes_transferred*/) {
+                connection->cancel_timeout();
+                auto lock = connection->handler_runner->continue_lock();
+                if(!lock)
+                  return;
+                if(!ec) {
+                  std::array<unsigned char, 8> length_bytes;
+                  connection->in_message->read(reinterpret_cast<char *>(&length_bytes[0]), 8);
+
+                  std::size_t length = 0;
+                  std::size_t num_bytes = 8;
+                  for(std::size_t c = 0; c < num_bytes; c++)
+                    length += static_cast<std::size_t>(length_bytes[c]) << (8 * (num_bytes - 1 - c));
+
+                  connection->in_message->length = length;
+                  this->read_message_content(connection, updated_num_additional_bytes > 8 ? updated_num_additional_bytes - 8 : 0);
+                }
+                else
+                  this->connection_error(connection, ec);
+              }));
+            }
+            else {
+              connection->in_message->length = length;
+              this->read_message_content(connection, updated_num_additional_bytes);
+            }
           }
-          auto updated_num_additional_bytes = num_additional_bytes > 2 ? num_additional_bytes - 2 : 0;
-
-          std::array<unsigned char, 2> first_bytes;
-          connection->in_message->read(reinterpret_cast<char *>(&first_bytes[0]), 2);
-
-          connection->in_message->fin_rsv_opcode = first_bytes[0];
-
-          // Close connection if masked message from server (protocol error)
-          if(first_bytes[1] >= 128) {
-            const std::string reason("message from server masked");
-            connection->send_close(1002, reason);
-            this->connection_close(connection, 1002, reason);
-            return;
-          }
-
-          std::size_t length = (first_bytes[1] & 127);
-
-          if(length == 126) {
-            // 2 next bytes is the size of content
-            connection->set_timeout();
-            asio::async_read(*connection->socket, connection->in_message->streambuf, asio::transfer_exactly(updated_num_additional_bytes > 2 ? 0 : 2 - updated_num_additional_bytes), [this, connection, updated_num_additional_bytes](const error_code &ec, std::size_t /*bytes_transferred*/) {
-              connection->cancel_timeout();
-              auto lock = connection->handler_runner->continue_lock();
-              if(!lock)
-                return;
-              if(!ec) {
-                std::array<unsigned char, 2> length_bytes;
-                connection->in_message->read(reinterpret_cast<char *>(&length_bytes[0]), 2);
-
-                std::size_t length = 0;
-                std::size_t num_bytes = 2;
-                for(std::size_t c = 0; c < num_bytes; c++)
-                  length += static_cast<std::size_t>(length_bytes[c]) << (8 * (num_bytes - 1 - c));
-
-                connection->in_message->length = length;
-                this->read_message_content(connection, updated_num_additional_bytes > 2 ? updated_num_additional_bytes - 2 : 0);
-              }
-              else
-                this->connection_error(connection, ec);
-            });
-          }
-          else if(length == 127) {
-            // 8 next bytes is the size of content
-            connection->set_timeout();
-            asio::async_read(*connection->socket, connection->in_message->streambuf, asio::transfer_exactly(updated_num_additional_bytes > 8 ? 0 : 8 - updated_num_additional_bytes), [this, connection, updated_num_additional_bytes](const error_code &ec, std::size_t /*bytes_transferred*/) {
-              connection->cancel_timeout();
-              auto lock = connection->handler_runner->continue_lock();
-              if(!lock)
-                return;
-              if(!ec) {
-                std::array<unsigned char, 8> length_bytes;
-                connection->in_message->read(reinterpret_cast<char *>(&length_bytes[0]), 8);
-
-                std::size_t length = 0;
-                std::size_t num_bytes = 8;
-                for(std::size_t c = 0; c < num_bytes; c++)
-                  length += static_cast<std::size_t>(length_bytes[c]) << (8 * (num_bytes - 1 - c));
-
-                connection->in_message->length = length;
-                this->read_message_content(connection, updated_num_additional_bytes > 8 ? updated_num_additional_bytes - 8 : 0);
-              }
-              else
-                this->connection_error(connection, ec);
-            });
-          }
-          else {
-            connection->in_message->length = length;
-            this->read_message_content(connection, updated_num_additional_bytes);
-          }
-        }
-        else
-          this->connection_error(connection, ec);
+          else
+            this->connection_error(connection, ec);
+        }));
       });
     }
 

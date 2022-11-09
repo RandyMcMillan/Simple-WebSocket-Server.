@@ -79,7 +79,8 @@ namespace SimpleWeb {
       friend class SocketServer<socket_type>;
 
     public:
-      Connection(std::unique_ptr<socket_type> &&socket_) noexcept : socket(std::move(socket_)), timeout_idle(0), close_sent(false) {}
+      /// Used to call SocketServer::upgrade.
+      Connection(std::unique_ptr<socket_type> &&socket_) noexcept : socket(std::move(socket_)), read_write_strand(get_executor(socket->lowest_layer())), timeout_idle(0), close_sent(false) {}
 
       std::string method, path, query_string, http_version;
 
@@ -88,14 +89,19 @@ namespace SimpleWeb {
       regex::smatch path_match;
 
     private:
-      /// Used to call SocketServer::upgrade.
       template <typename... Args>
       Connection(std::shared_ptr<ScopeRunner> handler_runner_, long timeout_idle, Args &&...args) noexcept
-          : handler_runner(std::move(handler_runner_)), socket(new socket_type(std::forward<Args>(args)...)), timeout_idle(timeout_idle), close_sent(false) {}
+          : handler_runner(std::move(handler_runner_)), socket(new socket_type(std::forward<Args>(args)...)), read_write_strand(get_executor(socket->lowest_layer())), timeout_idle(timeout_idle), close_sent(false) {}
 
       std::shared_ptr<ScopeRunner> handler_runner;
 
       std::unique_ptr<socket_type> socket; // Socket must be unique_ptr since asio::ssl::stream<asio::ip::tcp::socket> is not movable
+
+      /**
+       * Needed for TLS communication where async_read and async_write cannot be called concurrently.
+       * For more information see https://stackoverflow.com/a/12801042.
+       */
+      strand read_write_strand;
 
       asio::streambuf streambuf;
       std::shared_ptr<InMessage> fragmented_in_message;
@@ -159,38 +165,43 @@ namespace SimpleWeb {
         std::array<asio::const_buffer, 2> buffers{send_queue.begin()->out_header->streambuf.data(), send_queue.begin()->out_message->streambuf.data()};
         auto self = this->shared_from_this();
         set_timeout();
-        asio::async_write(*socket, buffers, [self](const error_code &ec, std::size_t /*bytes_transferred*/) {
-          self->set_timeout(); // Set timeout for next send
+        post(read_write_strand, [self, buffers] {
           auto lock = self->handler_runner->continue_lock();
           if(!lock)
             return;
-          {
-            LockGuard lock(self->send_queue_mutex);
-            if(!ec) {
-              auto it = self->send_queue.begin();
-              auto callback = std::move(it->callback);
-              self->send_queue.erase(it);
-              if(self->send_queue.size() > 0)
-                self->send_from_queue();
+          asio::async_write(*self->socket, buffers, [self](const error_code &ec, std::size_t /*bytes_transferred*/) {
+            self->set_timeout(); // Set timeout for next send
+            auto lock = self->handler_runner->continue_lock();
+            if(!lock)
+              return;
+            {
+              LockGuard lock(self->send_queue_mutex);
+              if(!ec) {
+                auto it = self->send_queue.begin();
+                auto callback = std::move(it->callback);
+                self->send_queue.erase(it);
+                if(self->send_queue.size() > 0)
+                  self->send_from_queue();
 
-              lock.unlock();
-              if(callback)
-                callback(ec);
-            }
-            else {
-              // All handlers in the queue is called with ec:
-              std::vector<std::function<void(const error_code &)>> callbacks;
-              for(auto &out_data : self->send_queue) {
-                if(out_data.callback)
-                  callbacks.emplace_back(std::move(out_data.callback));
+                lock.unlock();
+                if(callback)
+                  callback(ec);
               }
-              self->send_queue.clear();
+              else {
+                // All handlers in the queue is called with ec:
+                std::vector<std::function<void(const error_code &)>> callbacks;
+                for(auto &out_data : self->send_queue) {
+                  if(out_data.callback)
+                    callbacks.emplace_back(std::move(out_data.callback));
+                }
+                self->send_queue.clear();
 
-              lock.unlock();
-              for(auto &callback : callbacks)
-                callback(ec);
+                lock.unlock();
+                for(auto &callback : callbacks)
+                  callback(ec);
+              }
             }
-          }
+          });
         });
       }
 
@@ -602,88 +613,93 @@ namespace SimpleWeb {
 
     void read_message(const std::shared_ptr<Connection> &connection, Endpoint &endpoint) const {
       connection->set_timeout();
-      asio::async_read(*connection->socket, connection->streambuf, asio::transfer_exactly(2), [this, connection, &endpoint](const error_code &ec, std::size_t bytes_transferred) {
-        connection->cancel_timeout();
+      post(connection->read_write_strand, [this, connection, &endpoint] {
         auto lock = connection->handler_runner->continue_lock();
         if(!lock)
           return;
-        if(!ec) {
-          if(bytes_transferred == 0) { // TODO: why does this happen sometimes?
-            read_message(connection, endpoint);
+        asio::async_read(*connection->socket, connection->streambuf, asio::transfer_exactly(2), bind_executor(connection->read_write_strand, [this, connection, &endpoint](const error_code &ec, std::size_t bytes_transferred) {
+          connection->cancel_timeout();
+          auto lock = connection->handler_runner->continue_lock();
+          if(!lock)
             return;
-          }
-          std::istream istream(&connection->streambuf);
+          if(!ec) {
+            if(bytes_transferred == 0) { // TODO: why does this happen sometimes?
+              read_message(connection, endpoint);
+              return;
+            }
+            std::istream istream(&connection->streambuf);
 
-          std::array<unsigned char, 2> first_bytes;
-          istream.read((char *)&first_bytes[0], 2);
+            std::array<unsigned char, 2> first_bytes;
+            istream.read((char *)&first_bytes[0], 2);
 
-          unsigned char fin_rsv_opcode = first_bytes[0];
+            unsigned char fin_rsv_opcode = first_bytes[0];
 
-          // Close connection if unmasked message from client (protocol error)
-          if(first_bytes[1] < 128) {
-            const std::string reason("message from client not masked");
-            connection->send_close(1002, reason);
-            connection_close(connection, endpoint, 1002, reason);
-            return;
-          }
+            // Close connection if unmasked message from client (protocol error)
+            if(first_bytes[1] < 128) {
+              const std::string reason("message from client not masked");
+              connection->send_close(1002, reason);
+              connection_close(connection, endpoint, 1002, reason);
+              return;
+            }
 
-          std::size_t length = (first_bytes[1] & 127);
+            std::size_t length = (first_bytes[1] & 127);
 
-          if(length == 126) {
-            // 2 next bytes is the size of content
-            connection->set_timeout();
-            asio::async_read(*connection->socket, connection->streambuf, asio::transfer_exactly(2), [this, connection, &endpoint, fin_rsv_opcode](const error_code &ec, std::size_t /*bytes_transferred*/) {
-              connection->cancel_timeout();
-              auto lock = connection->handler_runner->continue_lock();
-              if(!lock)
-                return;
-              if(!ec) {
-                std::istream istream(&connection->streambuf);
+            if(length == 126) {
+              // 2 next bytes is the size of content
+              connection->set_timeout();
+              asio::async_read(*connection->socket, connection->streambuf, asio::transfer_exactly(2), bind_executor(connection->read_write_strand, [this, connection, &endpoint, fin_rsv_opcode](const error_code &ec, std::size_t /*bytes_transferred*/) {
+                connection->cancel_timeout();
+                auto lock = connection->handler_runner->continue_lock();
+                if(!lock)
+                  return;
+                if(!ec) {
+                  std::istream istream(&connection->streambuf);
 
-                std::array<unsigned char, 2> length_bytes;
-                istream.read((char *)&length_bytes[0], 2);
+                  std::array<unsigned char, 2> length_bytes;
+                  istream.read((char *)&length_bytes[0], 2);
 
-                std::size_t length = 0;
-                std::size_t num_bytes = 2;
-                for(std::size_t c = 0; c < num_bytes; c++)
-                  length += static_cast<std::size_t>(length_bytes[c]) << (8 * (num_bytes - 1 - c));
+                  std::size_t length = 0;
+                  std::size_t num_bytes = 2;
+                  for(std::size_t c = 0; c < num_bytes; c++)
+                    length += static_cast<std::size_t>(length_bytes[c]) << (8 * (num_bytes - 1 - c));
 
-                read_message_content(connection, length, endpoint, fin_rsv_opcode);
-              }
-              else
-                connection_error(connection, endpoint, ec);
-            });
-          }
-          else if(length == 127) {
-            // 8 next bytes is the size of content
-            connection->set_timeout();
-            asio::async_read(*connection->socket, connection->streambuf, asio::transfer_exactly(8), [this, connection, &endpoint, fin_rsv_opcode](const error_code &ec, std::size_t /*bytes_transferred*/) {
-              connection->cancel_timeout();
-              auto lock = connection->handler_runner->continue_lock();
-              if(!lock)
-                return;
-              if(!ec) {
-                std::istream istream(&connection->streambuf);
+                  read_message_content(connection, length, endpoint, fin_rsv_opcode);
+                }
+                else
+                  connection_error(connection, endpoint, ec);
+              }));
+            }
+            else if(length == 127) {
+              // 8 next bytes is the size of content
+              connection->set_timeout();
+              asio::async_read(*connection->socket, connection->streambuf, asio::transfer_exactly(8), bind_executor(connection->read_write_strand, [this, connection, &endpoint, fin_rsv_opcode](const error_code &ec, std::size_t /*bytes_transferred*/) {
+                connection->cancel_timeout();
+                auto lock = connection->handler_runner->continue_lock();
+                if(!lock)
+                  return;
+                if(!ec) {
+                  std::istream istream(&connection->streambuf);
 
-                std::array<unsigned char, 8> length_bytes;
-                istream.read((char *)&length_bytes[0], 8);
+                  std::array<unsigned char, 8> length_bytes;
+                  istream.read((char *)&length_bytes[0], 8);
 
-                std::size_t length = 0;
-                std::size_t num_bytes = 8;
-                for(std::size_t c = 0; c < num_bytes; c++)
-                  length += static_cast<std::size_t>(length_bytes[c]) << (8 * (num_bytes - 1 - c));
+                  std::size_t length = 0;
+                  std::size_t num_bytes = 8;
+                  for(std::size_t c = 0; c < num_bytes; c++)
+                    length += static_cast<std::size_t>(length_bytes[c]) << (8 * (num_bytes - 1 - c));
 
-                read_message_content(connection, length, endpoint, fin_rsv_opcode);
-              }
-              else
-                connection_error(connection, endpoint, ec);
-            });
+                  read_message_content(connection, length, endpoint, fin_rsv_opcode);
+                }
+                else
+                  connection_error(connection, endpoint, ec);
+              }));
+            }
+            else
+              read_message_content(connection, length, endpoint, fin_rsv_opcode);
           }
           else
-            read_message_content(connection, length, endpoint, fin_rsv_opcode);
-        }
-        else
-          connection_error(connection, endpoint, ec);
+            connection_error(connection, endpoint, ec);
+        }));
       });
     }
 
