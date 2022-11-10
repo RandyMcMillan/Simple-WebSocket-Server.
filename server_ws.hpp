@@ -150,11 +150,11 @@ namespace SimpleWeb {
       class OutData {
       public:
         OutData(std::shared_ptr<OutMessage> out_header_, std::shared_ptr<OutMessage> out_message_,
-                std::function<void(const error_code)> &&callback_) noexcept
+                std::function<void(const error_code &)> &&callback_) noexcept
             : out_header(std::move(out_header_)), out_message(std::move(out_message_)), callback(std::move(callback_)) {}
         std::shared_ptr<OutMessage> out_header;
         std::shared_ptr<OutMessage> out_message;
-        std::function<void(const error_code)> callback;
+        std::function<void(const error_code &)> callback;
       };
 
       Mutex send_queue_mutex;
