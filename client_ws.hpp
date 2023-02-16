@@ -311,6 +311,7 @@ namespace SimpleWeb {
 
     /// Start the client.
     /// If io_service is not set, an internal io_service is created instead.
+    /// If io_service is set, use make_work_guard to avoid sporadic returns from io_service::run().
     /// The callback parameter is called while the client is connecting to the server.
     void start(std::function<void()> callback = nullptr) {
       {
@@ -330,8 +331,10 @@ namespace SimpleWeb {
           post(*io_service, std::move(callback));
       }
 
-      if(internal_io_service)
+      if(internal_io_service) {
+        auto work_guard = make_work_guard(*io_service);
         io_service->run();
+      }
     }
 
     /// Stop client, and close current connection
