@@ -7,8 +7,10 @@ cmake_install.cmake
 install_manifest.txt
 *.cmake
 #Additions to https://github.com/github/gitignore/blob/master/CMake.gitignore
+build
 Testing
 compile_commands.json
+.cache
 .usages_clang
 
 *.crt
@@ -20,3 +22,8 @@ wss_examples
 swss_crypto_test
 swss_io_test
 swss_parse_test
+
+# Visual Studio 2015/2017 cache/options directory
+.vs
+
+doxygen_output
