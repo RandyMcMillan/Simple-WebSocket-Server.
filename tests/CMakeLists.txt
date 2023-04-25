@@ -6,13 +6,16 @@ if(NOT MSVC)
 
     add_executable(swss_parse_test parse_test.cpp)
     target_link_libraries(swss_parse_test simple-websocket-server)
+    set_target_properties(swss_parse_test PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED ON)
     add_test(swss_parse_test swss_parse_test)
 endif()
 
 add_executable(swss_crypto_test crypto_test.cpp)
 target_link_libraries(swss_crypto_test simple-websocket-server)
+set_target_properties(swss_crypto_test PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED ON)
 add_test(swss_crypto_test swss_crypto_test)
 
 add_executable(swss_io_test io_test.cpp)
 target_link_libraries(swss_io_test simple-websocket-server)
+set_target_properties(swss_io_test PROPERTIES CXX_STANDARD 11 CXX_STANDARD_REQUIRED ON)
 add_test(swss_io_test swss_io_test)
